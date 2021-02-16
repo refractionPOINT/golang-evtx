@@ -1,11 +1,13 @@
 package evtx
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
 	"math"
 	"os"
+	"regexp"
 	"sync"
 	"time"
 
@@ -42,6 +44,12 @@ func (cs ChunkSorter) Swap(i, j int) {
 
 //////////////////////////////////// File //////////////////////////////////////
 
+var (
+	ErrCorruptedHeader = fmt.Errorf("Corrupted header")
+	ErrDirtyFile       = fmt.Errorf("File is flagged as dirty")
+	ErrRepairFailed    = fmt.Errorf("File header could not be repaired")
+)
+
 // FileHeader structure definition
 type FileHeader struct {
 	Magic           [8]byte
@@ -58,30 +66,84 @@ type FileHeader struct {
 	CheckSum        uint32
 }
 
+func (f *FileHeader) Verify() error {
+	if !bytes.Equal(f.Magic[:], []byte("ElfFile\x00")) {
+		return ErrCorruptedHeader
+	}
+	// File is dirty
+	if f.Flags == 1 {
+		return ErrDirtyFile
+	}
+	return nil
+}
+
+// Repair the header. It makes sense to use this function
+// whenever the file is flagged as dirty
+func (f *FileHeader) Repair(r io.ReadSeeker) error {
+	chunkHeaderRE := regexp.MustCompile(ChunkMagic)
+	rr := bufio.NewReader(r)
+	cc := uint16(0)
+	for loc := chunkHeaderRE.FindReaderIndex(rr); loc != nil; loc = chunkHeaderRE.FindReaderIndex(rr) {
+		cc++
+	}
+
+	if f.ChunkCount > cc {
+		return ErrRepairFailed
+	}
+
+	// Fixing chunk count
+	f.ChunkCount = cc
+	// Fixing LastChunkNum
+	f.LastChunkNum = uint64(f.ChunkCount - 1)
+	// File is not dirty anymore
+	f.Flags = 0
+	return nil
+}
+
 // File structure definition
 type File struct {
 	sync.Mutex      // We need it if we want to parse (read) chunks in several threads
 	Header          FileHeader
-	file            *os.File
+	file            io.ReadSeeker
 	monitorExisting bool
+}
+
+// New EvtxFile structure initialized from an open buffer
+// @r : buffer containing evtx data to parse
+// return File : File structure initialized
+func New(r io.ReadSeeker) (ef File, err error) {
+	ef.file = r
+	ef.ParseFileHeader()
+	return
 }
 
 // New EvtxFile structure initialized from file
 // @filepath : filepath of the evtx file to parse
 // return File : File structure initialized
-func New(filepath string) (ef File, err error) {
+func Open(filepath string) (ef File, err error) {
 	file, err := os.Open(filepath)
 	if err != nil {
 		return
 	}
-	ef.file = file
-	ef.ParseFileHeader()
+
+	ef, err = New(file)
+	if err != nil {
+		return
+	}
+
+	err = ef.Header.Verify()
+
 	return
 }
 
-// Open alias to New to be complient with the Go way of programming
-func Open(filepath string) (ef File, err error) {
-	return New(filepath)
+// OpenDirty is a wrapper around Open to handle the case
+// where the file opened has its dirty flag set
+func OpenDirty(filepath string) (ef File, err error) {
+	// Repair the file header if file is dirty
+	if ef, err = Open(filepath); err == ErrDirtyFile {
+		err = ef.Header.Repair(ef.file)
+	}
+	return
 }
 
 // SetMonitorExisting sets monitorExisting flag of EvtxFile struct in order to
@@ -95,6 +157,7 @@ func (ef *File) SetMonitorExisting(value bool) {
 func (ef *File) ParseFileHeader() {
 	ef.Lock()
 	defer ef.Unlock()
+
 	GoToSeeker(ef.file, 0)
 	err := encoding.Unmarshal(ef.file, &ef.Header, Endianness)
 	if err != nil {
@@ -104,7 +167,7 @@ func (ef *File) ParseFileHeader() {
 
 func (fh FileHeader) String() string {
 	return fmt.Sprintf(
-		"Magic: %s\n"+
+		"Magic: %q\n"+
 			"FirstChunkNum: %d\n"+
 			"LastChunkNum: %d\n"+
 			"NumNextRecord: %d\n"+
@@ -176,8 +239,6 @@ func (ef *File) FetchChunk(offset int64) (Chunk, error) {
 
 // Chunks returns a chan of all the Chunks found in the current file
 // return (chan Chunk)
-// TODO: need to be improved: the chunk do not need to be loaded into memory there
-// we just need the header to sort them out. If we do so, do not need undordered chunks
 func (ef *File) Chunks() (cc chan Chunk) {
 	ss := datastructs.NewSortedSlice(0, int(ef.Header.ChunkCount))
 	cc = make(chan Chunk)
@@ -310,10 +371,17 @@ func (ef *File) Events() (cgem chan *GoEvtxMap) {
 	go func() {
 		defer close(cgem)
 		for c := range ef.Chunks() {
-			for e := range c.Events() {
-				cgem <- e
+			cpc, err := ef.FetchChunk(c.Offset)
+			switch {
+			case err != nil && err != io.EOF:
+				panic(err)
+			case err == nil:
+				for ev := range cpc.Events() {
+					cgem <- ev
+				}
 			}
 		}
+
 	}()
 	return
 }
@@ -329,10 +397,6 @@ func (ef *File) FastEvents() (cgem chan *GoEvtxMap) {
 		go func() {
 			defer close(chanQueue)
 			for pc := range ef.Chunks() {
-				// We have to create a copy here because otherwise cpc.EventsChan() fails
-				// I guess that because EventsChan takes a pointer to an object and that
-				// and thus the chan is taken on the pointer and since the object pointed
-				// changes -> kaboom
 				cpc, err := ef.FetchChunk(pc.Offset)
 				switch {
 				case err != nil && err != io.EOF:
@@ -429,5 +493,9 @@ func (ef *File) MonitorEvents(stop chan bool, sleep ...time.Duration) (cgem chan
 
 // Close file
 func (ef *File) Close() error {
-	return ef.file.Close()
+	if f, ok := ef.file.(io.Closer); ok {
+		return f.Close()
+	}
+
+	return nil
 }

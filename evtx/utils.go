@@ -57,9 +57,11 @@ func DebugReader(reader io.ReadSeeker, before, after int64) {
 	var out string
 	out += fmt.Sprintf("Relative offset: 0x%08x\n", cur)
 	out += "Last parsed elements : "
-	for _, e := range lastParsedElements {
+	lastParsedElements.RLock()
+	for _, e := range lastParsedElements.elements {
 		out += fmt.Sprintf("%T, ", e)
 	}
+	lastParsedElements.RUnlock()
 	out += "\n"
 	for i, c := range b {
 		if int64(i) == before {
@@ -78,8 +80,16 @@ func DebugReader(reader io.ReadSeeker, before, after int64) {
 }
 
 func UpdateLastElements(e Element) {
-	copy(lastParsedElements[:], lastParsedElements[1:])
-	lastParsedElements[len(lastParsedElements)-1] = e
+	// There is a data race triggered there by the race
+	// detector however it is an acceptable race since it
+	// is a function used for debugging purposes.
+	// issue: https://github.com/0xrawsec/golang-evtx/issues/25
+	if Debug {
+		lastParsedElements.Lock()
+		defer lastParsedElements.Unlock()
+		copy(lastParsedElements.elements[:], lastParsedElements.elements[1:])
+		lastParsedElements.elements[len(lastParsedElements.elements)-1] = e
+	}
 }
 
 func BackupSeeker(seeker io.Seeker) int64 {
@@ -138,19 +148,21 @@ type FileTime struct {
 	Nanoseconds int64
 }
 
-func (v *FileTime) Convert() float64 {
-	return float64(v.Nanoseconds)/10000000.0 - 11644473600.0
+func (v *FileTime) Convert() (sec int64, nsec int64) {
+	nano := int64(10000000)
+	//milli := int64(10000)
+	sec = int64(float64(v.Nanoseconds)/float64(nano) - 11644473600.0)
+	nsec = ((v.Nanoseconds - 11644473600*nano) - sec*nano) * 100
+	return
 }
 
-/*func (s *FileTime) Time() time.Time {
-	return time.Unix(int64(s.Convert()), 0)
-}*/
-
 func (s *FileTime) Time() UTCTime {
-	return UTCTime(time.Unix(int64(s.Convert()), 0))
+	sec, nsec := s.Convert()
+	return UTCTime(time.Unix(sec, nsec))
 }
 
 func (s *FileTime) String() string {
 	//"2015-12-10T17:56:53.515800800Z"
-	return time.Unix(int64(s.Convert()), 0).Format(time.RFC3339)
+	sec, nsec := s.Convert()
+	return time.Unix(sec, nsec).Format(time.RFC3339Nano)
 }

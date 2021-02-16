@@ -22,6 +22,7 @@ package main
 
 import (
 	"compress/gzip"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -35,6 +36,7 @@ import (
 	"github.com/0xrawsec/golang-utils/args"
 	"github.com/0xrawsec/golang-utils/datastructs"
 	"github.com/0xrawsec/golang-utils/log"
+	"github.com/0xrawsec/golang-win32/win32/wevtapi"
 )
 
 const (
@@ -42,7 +44,6 @@ const (
 	ExitSuccess = 0
 	// ExitFailure RC
 	ExitFailure = 1
-	Version     = "Evtxmon 1.1"
 	Copyright   = "Evtxmon Copyright (C) 2017 RawSec SARL (@0xrawsec)"
 	License     = `License GPLv3: This program comes with ABSOLUTELY NO WARRANTY.
 This is free software, and you are welcome to redistribute it under certain
@@ -160,6 +161,19 @@ func (s *Stats) Summary() {
 	}
 }
 
+func XMLEventToGoEvtxMap(xe *wevtapi.XMLEvent) (*evtx.GoEvtxMap, error) {
+	ge := make(evtx.GoEvtxMap)
+	bytes, err := json.Marshal(xe.ToJSONEvent())
+	if err != nil {
+		return &ge, err
+	}
+	err = json.Unmarshal(bytes, &ge)
+	if err != nil {
+		return &ge, err
+	}
+	return &ge, nil
+}
+
 func main() {
 	var err error
 	var ofile *os.File
@@ -204,7 +218,7 @@ func main() {
 
 	// version
 	if version {
-		fmt.Fprintf(os.Stderr, "%s\n%s\n%s\n", Version, Copyright, License)
+		fmt.Fprintf(os.Stderr, "%s (commit: %s)\n%s\n%s\n", Version, CommitID, Copyright, License)
 		return
 	}
 
@@ -226,8 +240,8 @@ func main() {
 		os.Exit(1)
 	} else {
 		stop := make(chan bool, 1)
-		ef, err := evtx.New(evtxfile)
-		if err != nil {
+		ef, err := evtx.Open(evtxfile)
+		if err != nil && err != evtx.ErrDirtyFile {
 			log.LogErrorAndExit(err)
 		}
 
@@ -257,6 +271,15 @@ func main() {
 		if monitorExisting {
 			ef.SetMonitorExisting(true)
 		}
+		/*xmlEvents := h.eventProvider.FetchEvents(channels, wevtapi.EvtSubscribeToFutureEvents)
+		for xe := range xmlEvents {
+			event, err := XMLEventToGoEvtxMap(xe)
+			if err != nil {
+				log.Errorf("Failed to convert event: %s", err)
+				log.Debugf("Error data: %v", xe)
+			}
+		}*/
+
 		for e := range ef.MonitorEvents(stop) {
 			if output != "" {
 				writer.Write(evtx.ToJSON(e))

@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0xrawsec/golang-utils/log"
+	"github.com/0xrawsec/golang-utils/datastructs"
+
 	"github.com/0xrawsec/golang-evtx/evtx"
+	"github.com/0xrawsec/golang-utils/log"
 )
 
 var (
@@ -34,7 +36,7 @@ func init() {
 }
 
 func TestParseAt(t *testing.T) {
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	offsetChunk := 0x033c1000
 	offsetElt := 0x21c
 
@@ -47,9 +49,17 @@ func TestParseAt(t *testing.T) {
 	elt, _ := evtx.Parse(reader, &c, false)
 	switch elt.(type) {
 	case *evtx.Fragment:
-		t.Log(string(evtx.ToJSON(elt.(*evtx.Fragment).GoEvtxMap())))
+		m, err := elt.(*evtx.Fragment).GoEvtxMap()
+		if err != nil {
+			panic(err)
+		}
+		t.Log(string(evtx.ToJSON(m)))
 	case *evtx.TemplateInstance:
-		t.Log(string(evtx.ToJSON(elt.(*evtx.TemplateInstance).GoEvtxMap())))
+		m, err := elt.(*evtx.TemplateInstance).GoEvtxMap()
+		if err != nil {
+			panic(err)
+		}
+		t.Log(string(evtx.ToJSON(m)))
 	default:
 		t.Log(elt)
 
@@ -57,7 +67,7 @@ func TestParseAt(t *testing.T) {
 }
 
 func TestNodeTree(t *testing.T) {
-	ef, _ := evtx.New(evtxFile)
+	ef, _ := evtx.Open(evtxFile)
 	offsetChunk := 0x00251000
 	offsetElt := 1852
 
@@ -86,7 +96,7 @@ func TestNodeTree(t *testing.T) {
 	}
 	t.Log(l)
 	// Debug
-	gem := temp.GoEvtxMap()
+	gem, err := temp.GoEvtxMap()
 	t.Log(string(evtx.ToJSON(gem)))
 	if err != nil {
 		t.Error(err)
@@ -95,7 +105,7 @@ func TestNodeTree(t *testing.T) {
 }
 
 func TestParseOneChunk(t *testing.T) {
-	ef, _ := evtx.New(forwardedEvtxFile)
+	ef, _ := evtx.Open(forwardedEvtxFile)
 	offsetChunk := int64(0x016e1000)
 	c, err := ef.FetchChunk(offsetChunk)
 	if err != nil && err != io.EOF {
@@ -109,7 +119,7 @@ func TestParseOneChunk(t *testing.T) {
 }
 
 func TestParseEventAt(t *testing.T) {
-	ef, _ := evtx.New(forwardedEvtxFile)
+	ef, _ := evtx.Open(forwardedEvtxFile)
 	offsetChunk := 0x016e1000
 	offsetEvent := 0x016ef748 - offsetChunk
 	c, err := ef.FetchChunk(int64(offsetChunk))
@@ -127,7 +137,7 @@ func TestParseEventAt(t *testing.T) {
 func TestParseEventByID(t *testing.T) {
 	filepath := appReadyFile
 	t.Logf("Parsing: %s ", filepath)
-	ef, _ := evtx.New(filepath)
+	ef, _ := evtx.Open(filepath)
 	eventRecordID := int64(1448)
 loop:
 	for c := range ef.Chunks() {
@@ -145,34 +155,39 @@ loop:
 }
 
 func TestParseAllEvents(t *testing.T) {
-	maxChunks := 1000
-	chunkCount := 0
-	ef, _ := evtx.New(forwardedEvtxFile)
-	log.Info(ef.Header)
-	for c := range ef.Chunks() {
-		//log.Info(c.Header)
-		if chunkCount >= maxChunks && maxChunks >= 0 {
-			break
-		}
-		for e := range c.Events() {
-			t.Log(string(evtx.ToJSON(e)))
-		}
-		chunkCount++
+	eventCnt := 0
+	recordIds := datastructs.NewSyncedSet()
+	ef, err := evtx.OpenDirty(sysmonFile)
+	if err != nil {
+		t.Logf("Failed at opening EVTX file: %s", err)
+		t.Fail()
 	}
+	log.Info(ef.Header)
+	for e := range ef.Events() {
+		if recordIds.Contains(e.EventRecordID()) {
+			t.Log("Event already processed")
+			t.Fail()
+		}
+		//t.Log(string(evtx.ToJSON(e)))
+		recordIds.Add(e.EventRecordID())
+		eventCnt++
+
+	}
+	t.Logf("%d events parsed", eventCnt)
 }
 
 func TestParseChunk(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping in short test")
 	}
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	for e := range ef.FastEvents() {
 		t.Log(string(evtx.ToJSON(e)))
 	}
 }
 
 /*func TestMonitorChunks(t *testing.T) {
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	stop := make(chan bool, 1)
 	go func() {
 		time.Sleep(time.Second * 10)
@@ -184,7 +199,7 @@ func TestParseChunk(t *testing.T) {
 }*/
 
 func TestRightOrderSlowEvents(t *testing.T) {
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	i := 0
 	prevErid := uint64(0)
 	sPath := evtx.Path("/Event/System/EventRecordID/Value")
@@ -203,7 +218,7 @@ func TestRightOrderSlowEvents(t *testing.T) {
 }
 
 func TestRightOrderFastEvents(t *testing.T) {
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	prevErid := int64(0)
 	i := 0
 	for e := range ef.FastEvents() {
@@ -221,7 +236,7 @@ func TestRightOrderFastEvents(t *testing.T) {
 }
 
 func TestFilter(t *testing.T) {
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	p := evtx.Path("/Event/EventData/Data1/Value")
 	for e := range ef.FastEvents() {
 		if e.Equal(&p, "B2796A13-E43D-5880-0000-0010C55A0F00") {
@@ -232,7 +247,7 @@ func TestFilter(t *testing.T) {
 }
 
 func TestEventIDFilter(t *testing.T) {
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	for e := range ef.FastEvents() {
 		if e.IsEventID("1", "12") {
 			t.Log(string(evtx.ToJSON(e)))
@@ -242,7 +257,7 @@ func TestEventIDFilter(t *testing.T) {
 
 func TestPatternFilter(t *testing.T) {
 	pattern := regexp.MustCompile("MD5=D81F3ABB789C1D4504203171467A5E4E")
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	p := evtx.Path("/Event/EventData/Data11/Value")
 	for e := range ef.FastEvents() {
 		if e.RegexMatch(&p, pattern) {
@@ -253,7 +268,7 @@ func TestPatternFilter(t *testing.T) {
 }
 
 func TestMapFilter(t *testing.T) {
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	p := evtx.Path("/Event/EventData/Data11/Name")
 	for e := range ef.FastEvents() {
 		m, err := e.GetMap(&p)
@@ -265,7 +280,7 @@ func TestMapFilter(t *testing.T) {
 }
 
 func TestMapWhereFilter(t *testing.T) {
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	p := evtx.Path("/Event/EventData/Data1/Name")
 	for e := range ef.FastEvents() {
 		m, err := e.GetMapWhere(&p, "SourceProcessGUID")
@@ -278,7 +293,7 @@ func TestMapWhereFilter(t *testing.T) {
 
 func TestBetweenFilter(t *testing.T) {
 	i := 0
-	ef, _ := evtx.New(sysmonFile)
+	ef, _ := evtx.Open(sysmonFile)
 	t1, err := time.Parse(time.RFC3339, "2017-01-19T17:07:20+01:00")
 	if err != nil {
 		panic(err)
@@ -296,6 +311,34 @@ func TestBetweenFilter(t *testing.T) {
 	t.Logf("%d events between %v and %v", i, t1, t2)
 }
 
+func TestDelete(t *testing.T) {
+	utctimePath := evtx.Path("/Event/EventData/UtcTime")
+	ef, _ := evtx.Open(sysmonFile)
+	for e := range ef.FastEvents() {
+		e.Del(&utctimePath)
+		if _, err := e.GetString(&utctimePath); err == nil {
+			t.Errorf("Failed to delete field")
+			t.FailNow()
+		}
+	}
+}
+
+func TestAddDelete(t *testing.T) {
+	geneInfoPath := evtx.Path("/Event/GeneInfo")
+	genInfo := map[string]interface{}{
+		"Signature":   []string{"test", "blop"},
+		"Criticality": 10}
+	ef, _ := evtx.Open(sysmonFile)
+	for e := range ef.FastEvents() {
+		e.Set(&geneInfoPath, genInfo)
+		e.Del(&geneInfoPath)
+		if _, err := e.Get(&geneInfoPath); err == nil {
+			t.Errorf("Failed to delete field")
+			t.FailNow()
+		}
+	}
+}
+
 func TestAllFiles(t *testing.T) {
 	files, err := ioutil.ReadDir(testfilesDir)
 	if err != nil {
@@ -304,7 +347,7 @@ func TestAllFiles(t *testing.T) {
 	for _, fi := range files {
 		fullpath := filepath.Join(testfilesDir, fi.Name())
 		t.Logf("Parsing : %s", fullpath)
-		ef, _ := evtx.New(fullpath)
+		ef, _ := evtx.Open(fullpath)
 		for _ = range ef.FastEvents() {
 		}
 	}
@@ -317,7 +360,7 @@ func TestUserID(t *testing.T) {
 	}
 	for _, fi := range files {
 		fullpath := filepath.Join(testfilesDir, fi.Name())
-		ef, _ := evtx.New(fullpath)
+		ef, _ := evtx.Open(fullpath)
 		for e := range ef.FastEvents() {
 			if uid, ok := e.UserID(); ok {
 				if uid == "" {
@@ -327,5 +370,4 @@ func TestUserID(t *testing.T) {
 			}
 		}
 	}
-
 }
